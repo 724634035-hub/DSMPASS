@@ -1365,7 +1365,7 @@ function SourceDetail({
       setSyncApplying(true);
       setSyncError(null);
       try {
-        const { run_id } = await api.startSyncRun(source.slug, syncMode);
+        const { run_id } = await api.startSyncRun(source.slug, syncMode, syncMode === "full");
         await waitOperation(run_id);
         showLatestSyncLogs();
         await refreshAll();

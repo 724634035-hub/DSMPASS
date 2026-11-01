@@ -35,6 +35,9 @@ type Server struct {
 	tlsRefreshMu     sync.Mutex
 	refreshTLS       func(string)
 
+	dataEncryptionKey    []byte
+	dataEncryptionKeyErr error
+
 	allowMultipleIdentitySources bool
 }
 
@@ -74,6 +77,7 @@ func NewWithDatabases(cfg config.BackendConfig, helper helperclient.Client, data
 
 func newServer(cfg config.BackendConfig, helper helperclient.Client, database *sql.DB, store *db.Queries) *Server {
 	cfg.RelayMode = "socket"
+	dataEncryptionKey, dataEncryptionKeyErr := serverDataEncryptionKey(cfg.DataEncryptionKey)
 	return &Server{
 		cfg:         cfg,
 		helper:      helper,
@@ -84,6 +88,9 @@ func newServer(cfg config.BackendConfig, helper helperclient.Client, database *s
 		states:      map[string]oauthState{},
 		syncRuns:    map[string]bool{},
 		autoSync:    map[string]time.Time{},
+
+		dataEncryptionKey:    dataEncryptionKey,
+		dataEncryptionKeyErr: dataEncryptionKeyErr,
 
 		allowMultipleIdentitySources: buildinfo.MultipleIdentitySourcesAllowed(),
 	}

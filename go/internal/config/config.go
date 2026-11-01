@@ -16,6 +16,8 @@ type BackendConfig struct {
 	IDPListen                  string
 	DatabaseURL                string
 	DataDir                    string
+	DataEncryptionKey          string
+	DataEncryptionKeyFile      string
 	TLSEnabled                 bool
 	TLSCertFile                string
 	TLSKeyFile                 string
@@ -124,6 +126,8 @@ func LoadBackend() BackendConfig {
 		IDPListen:                  idpListen,
 		DatabaseURL:                env("DSMPASS_DATABASE_URL", "sqlite:///volume1/docker/dsmpass/dsmpass.db"),
 		DataDir:                    dataDir,
+		DataEncryptionKey:          os.Getenv("DSMPASS_DATA_ENCRYPTION_KEY"),
+		DataEncryptionKeyFile:      env("DSMPASS_DATA_ENCRYPTION_KEY_FILE", dataDir+"/secrets/master.key"),
 		TLSEnabled:                 tlsEnabled,
 		TLSCertFile:                env("DSMPASS_TLS_CERT_FILE", dataDir+"/tls/server.crt"),
 		TLSKeyFile:                 env("DSMPASS_TLS_KEY_FILE", dataDir+"/tls/server.key"),

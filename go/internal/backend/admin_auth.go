@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -92,7 +93,7 @@ func (s *Server) adminSetup(c *gin.Context) {
 	s.cfg.AdminPassword = passwordHash
 	s.cfg.AdminSetupRequired = false
 	s.adminMu.Unlock()
-	token, expires, err := s.issueAdminJWT()
+	token, expires, err := s.issueAdminJWT(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
@@ -123,7 +124,7 @@ func (s *Server) adminLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "unauthorized"})
 		return
 	}
-	token, expires, err := s.issueAdminJWT()
+	token, expires, err := s.issueAdminJWT(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
@@ -207,7 +208,10 @@ func (s *Server) validAdminSession(c *gin.Context) bool {
 	return claims.Username == s.cfg.AdminUsername
 }
 
-func (s *Server) issueAdminJWT() (string, time.Time, error) {
+func (s *Server) issueAdminJWT(ctx context.Context) (string, time.Time, error) {
+	if err := s.ensureAdminJWTSecret(ctx); err != nil {
+		return "", time.Time{}, err
+	}
 	now := time.Now()
 	expires := now.Add(adminSessionTTL)
 	header := map[string]string{"alg": "HS256", "typ": "JWT"}

@@ -39,7 +39,7 @@ func TestFullSyncRejectsOldHelperBeforeReadingOrChangingDirectory(t *testing.T) 
 	}
 	s := NewWithDB(config.BackendConfig{}, oldSyncHelper{}, database, q)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/sync/a/apply", strings.NewReader(`{"mode":"full"}`))
+	r := httptest.NewRequest(http.MethodPost, "/api/sync/a/apply", strings.NewReader(`{"mode":"full","password_reset_confirmed":true}`))
 	r.Header.Set("Content-Type", "application/json")
 	s.Router().ServeHTTP(w, r)
 	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Helper 不支持全量同步") {
@@ -51,6 +51,29 @@ func TestFullSyncRejectsOldHelperBeforeReadingOrChangingDirectory(t *testing.T) 
 	}
 }
 
+func TestFullSyncEndpointRequiresConfirmationBeforeStartingRun(t *testing.T) {
+	ctx := context.Background()
+	database, q, err := OpenDatabase(ctx, "sqlite://:memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO identity_sources (slug,provider_type,display_name) VALUES ('a','feishu','A')`); err != nil {
+		t.Fatal(err)
+	}
+	s := NewWithDB(config.BackendConfig{}, testHelper{}, database, q)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/sync/a/apply", strings.NewReader(`{"mode":"full"}`))
+	r.Header.Set("Content-Type", "application/json")
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "password_reset_confirmed=true") {
+		t.Fatalf("unexpected response: %d %s", w.Code, w.Body.String())
+	}
+	var runs int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sync_runs`).Scan(&runs); err != nil || runs != 0 {
+		t.Fatalf("unconfirmed full sync started work: runs=%d err=%v", runs, err)
+	}
+}
 func (h *syncPasswordHelper) ResetSyncedUserPassword(ctx context.Context, requestID, sourceSlug, accountID, username, password string) error {
 	h.resets = append(h.resets, sourceSlug+":"+username)
 	h.passwords = append(h.passwords, password)
@@ -82,7 +105,7 @@ func TestFullSyncContinuesOtherAccountsAfterPasswordFailure(t *testing.T) {
 	for _, username := range []string{"alice", "bob"} {
 		seedSyncedAccount(t, ctx, database, "a", username, "ext-"+username, username, username, "2999-01-01")
 	}
-	operations, err := s.syncSourceToDSM(ctx, "partial", "a", "2000-01-01", sourceSyncPolicy{FullSync: true})
+	operations, err := s.syncSourceToDSM(ctx, "partial", "a", "2000-01-01", sourceSyncPolicy{FullSync: true, PasswordResetConfirmed: true})
 	if err == nil || !strings.Contains(err.Error(), "alice") {
 		t.Fatal("partial failure was hidden")
 	}
@@ -115,14 +138,14 @@ func TestFullSyncContinuesWhenAnAccountHasAnActiveLogin(t *testing.T) {
 	for _, username := range []string{"alice", "bob"} {
 		seedSyncedAccount(t, ctx, database, "a", username, "ext-"+username, username, username, "2999-01-01")
 	}
-	if _, err := s.syncSourceToDSM(ctx, "busy", "a", "2000-01-01", sourceSyncPolicy{FullSync: true}); err == nil {
+	if _, err := s.syncSourceToDSM(ctx, "busy", "a", "2000-01-01", sourceSyncPolicy{FullSync: true, PasswordResetConfirmed: true}); err == nil {
 		t.Fatal("busy account was reported as synchronized")
 	}
 	if len(h.resets) != 1 || h.resets[0] != "a:bob" {
 		t.Fatalf("busy account blocked another account or had its password reset: %v", h.resets)
 	}
 	h.busyUser = ""
-	if _, err := s.syncSourceToDSM(ctx, "retry", "a", "2000-01-01", sourceSyncPolicy{FullSync: true}); err != nil {
+	if _, err := s.syncSourceToDSM(ctx, "retry", "a", "2000-01-01", sourceSyncPolicy{FullSync: true, PasswordResetConfirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.resets) != 3 || h.resets[1] != "a:alice" {
@@ -132,21 +155,27 @@ func TestFullSyncContinuesWhenAnAccountHasAnActiveLogin(t *testing.T) {
 
 func TestReadSyncMode(t *testing.T) {
 	for _, tc := range []struct {
-		body string
-		want syncMode
-		ok   bool
+		body          string
+		want          syncMode
+		wantConfirmed bool
+		ok            bool
 	}{
-		{"", syncIncremental, true}, {"{}", syncIncremental, true},
-		{`{"mode":"incremental"}`, syncIncremental, true}, {`{"mode":"full"}`, syncFull, true},
-		{`{"mode":"typo"}`, "", false}, {`{"mode":true}`, "", false}, {"{", "", false},
+		{"", syncIncremental, false, true},
+		{"{}", syncIncremental, false, true},
+		{`{"mode":"incremental"}`, syncIncremental, false, true},
+		{`{"mode":"full","password_reset_confirmed":true}`, syncFull, true, true},
+		{`{"mode":"full"}`, "", false, false},
+		{`{"mode":"typo"}`, "", false, false},
+		{`{"mode":true}`, "", false, false},
+		{"{", "", false, false},
 	} {
 		t.Run(tc.body, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
-			mode, ok := readSyncMode(c)
-			if mode != tc.want || ok != tc.ok {
-				t.Fatalf("got %q/%v", mode, ok)
+			mode, confirmed, ok := readSyncMode(c)
+			if mode != tc.want || confirmed != tc.wantConfirmed || ok != tc.ok {
+				t.Fatalf("got %q/%v/%v", mode, confirmed, ok)
 			}
 			if !ok && w.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d", w.Code)
@@ -191,7 +220,7 @@ VALUES ('duplicate','user','a','ext-alice-2','','account-alice');`); err != nil 
 		t.Fatal("incremental sync reset existing passwords")
 	}
 	for run := 0; run < 2; run++ {
-		if _, err := s.syncSourceToDSM(ctx, "full", "a", "2000-01-01", sourceSyncPolicy{FullSync: true}); err != nil {
+		if _, err := s.syncSourceToDSM(ctx, "full", "a", "2000-01-01", sourceSyncPolicy{FullSync: true, PasswordResetConfirmed: true}); err != nil {
 			t.Fatal(err)
 		}
 		if len(h.resets) != 2*(run+1) || h.resets[2*run] != "a:alice" || h.resets[2*run+1] != "a:manual" {
@@ -228,7 +257,7 @@ func TestFullSyncResetFailureIsRecordedAndRetryUsesSamePassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedSyncedAccount(t, ctx, database, "a", "alice", "ext-alice", "alice", "alice", "2999-01-01")
-	if _, err := s.syncSourceToDSM(ctx, "failed", "a", "2000-01-01", sourceSyncPolicy{FullSync: true}); err == nil {
+	if _, err := s.syncSourceToDSM(ctx, "failed", "a", "2000-01-01", sourceSyncPolicy{FullSync: true, PasswordResetConfirmed: true}); err == nil {
 		t.Fatal("reset failure was hidden")
 	}
 	var failures int
@@ -236,7 +265,7 @@ func TestFullSyncResetFailureIsRecordedAndRetryUsesSamePassword(t *testing.T) {
 		t.Fatal("missing failure record")
 	}
 	h.fail = false
-	if _, err := s.syncSourceToDSM(ctx, "retry", "a", "2000-01-01", sourceSyncPolicy{FullSync: true}); err != nil {
+	if _, err := s.syncSourceToDSM(ctx, "retry", "a", "2000-01-01", sourceSyncPolicy{FullSync: true, PasswordResetConfirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.passwords) != 2 || h.passwords[0] != h.passwords[1] {

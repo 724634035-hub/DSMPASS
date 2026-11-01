@@ -63,7 +63,17 @@ func main() {
 		_ = listener.Close()
 		log.Fatal(err)
 	}
+	dataEncryptionKey, err := backend.LoadOrCreateDataEncryptionKey(cfg)
+	if err != nil {
+		_ = listener.Close()
+		log.Fatal(err)
+	}
+	cfg.DataEncryptionKey = dataEncryptionKey
 	server := backend.NewWithDatabases(cfg, backend.HelperFromConfig(cfg), database, queries, logDatabase, logQueries)
+	if err := server.PrepareDataSecurity(context.Background()); err != nil {
+		_ = listener.Close()
+		log.Fatal(err)
+	}
 	if err := server.CleanupIdentitySourcePublicBaseURLs(context.Background()); err != nil {
 		log.Printf("failed to clean identity source public base urls: %v", err)
 	}

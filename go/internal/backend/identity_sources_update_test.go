@@ -66,7 +66,8 @@ func TestUpdateProviderAcceptsSameImmutableCredentialValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	router := NewWithDB(config.BackendConfig{RelayMode: "socket", DSMCookieName: "id"}, testHelper{}, database, queries).Router()
+	server := NewWithDB(config.BackendConfig{RelayMode: "socket", DSMCookieName: "id"}, testHelper{}, database, queries)
+	router := server.Router()
 
 	createResponse := httptest.NewRecorder()
 	createRequest := httptest.NewRequest("POST", "/api/admin/providers", strings.NewReader(`{
@@ -82,11 +83,34 @@ func TestUpdateProviderAcceptsSameImmutableCredentialValues(t *testing.T) {
 	if createResponse.Code != http.StatusOK {
 		t.Fatalf("create provider got %d body=%s", createResponse.Code, createResponse.Body.String())
 	}
+	if strings.Contains(createResponse.Body.String(), "secret_original") {
+		t.Fatalf("create provider response leaked client secret: %s", createResponse.Body.String())
+	}
 	var created struct {
 		Slug string `json:"slug"`
 	}
 	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
+	}
+	var createdConfigJSON, createdEncryptedSecret string
+	if err := database.QueryRow(`SELECT config_json FROM identity_sources WHERE slug = ?`, created.Slug).Scan(&createdConfigJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(createdConfigJSON, "client_secret") || strings.Contains(createdConfigJSON, "secret_original") {
+		t.Fatalf("created provider stored a plaintext secret: %s", createdConfigJSON)
+	}
+	if err := database.QueryRow(`SELECT encrypted_secret FROM source_client_secrets WHERE source_slug = ?`, created.Slug).Scan(&createdEncryptedSecret); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(createdEncryptedSecret, "v1:") || strings.Contains(createdEncryptedSecret, "secret_original") {
+		t.Fatalf("created provider secret was not encrypted independently: %q", createdEncryptedSecret)
+	}
+	createdSource, err := server.loadIdentitySource(context.Background(), created.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored := decodeSourceConfigForType(createdSource.ProviderType, createdSource.ConfigJSON); restored.ClientSecret != "secret_original" {
+		t.Fatal("created provider secret could not be restored")
 	}
 
 	updateResponse := httptest.NewRecorder()
@@ -127,7 +151,8 @@ func TestUpdateProviderRejectsImmutableAgentIDChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	router := NewWithDB(config.BackendConfig{RelayMode: "socket", DSMCookieName: "id"}, testHelper{}, database, queries).Router()
+	server := NewWithDB(config.BackendConfig{RelayMode: "socket", DSMCookieName: "id"}, testHelper{}, database, queries)
+	router := server.Router()
 
 	createResponse := httptest.NewRecorder()
 	createRequest := httptest.NewRequest("POST", "/api/admin/providers", strings.NewReader(`{
@@ -144,11 +169,34 @@ func TestUpdateProviderRejectsImmutableAgentIDChange(t *testing.T) {
 	if createResponse.Code != http.StatusOK {
 		t.Fatalf("create provider got %d body=%s", createResponse.Code, createResponse.Body.String())
 	}
+	if strings.Contains(createResponse.Body.String(), "secret_original") {
+		t.Fatalf("create provider response leaked client secret: %s", createResponse.Body.String())
+	}
 	var created struct {
 		Slug string `json:"slug"`
 	}
 	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
+	}
+	var createdConfigJSON, createdEncryptedSecret string
+	if err := database.QueryRow(`SELECT config_json FROM identity_sources WHERE slug = ?`, created.Slug).Scan(&createdConfigJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(createdConfigJSON, "client_secret") || strings.Contains(createdConfigJSON, "secret_original") {
+		t.Fatalf("created provider stored a plaintext secret: %s", createdConfigJSON)
+	}
+	if err := database.QueryRow(`SELECT encrypted_secret FROM source_client_secrets WHERE source_slug = ?`, created.Slug).Scan(&createdEncryptedSecret); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(createdEncryptedSecret, "v1:") || strings.Contains(createdEncryptedSecret, "secret_original") {
+		t.Fatalf("created provider secret was not encrypted independently: %q", createdEncryptedSecret)
+	}
+	createdSource, err := server.loadIdentitySource(context.Background(), created.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored := decodeSourceConfigForType(createdSource.ProviderType, createdSource.ConfigJSON); restored.ClientSecret != "secret_original" {
+		t.Fatal("created provider secret could not be restored")
 	}
 
 	updateResponse := httptest.NewRecorder()

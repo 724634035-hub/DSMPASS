@@ -1016,7 +1016,8 @@ func TestWeComProviderRequiresAgentIDForConfiguredCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	router := NewWithDB(cfg, testHelper{}, database, queries).Router()
+	server := NewWithDB(cfg, testHelper{}, database, queries)
+	router := server.Router()
 
 	createResponse := httptest.NewRecorder()
 	createRequest := httptest.NewRequest("POST", "/api/admin/providers", strings.NewReader(`{"provider_type":"wecom","display_name":"企业微信","config":{"client_id":" wwcorp ","client_secret":" secret "}}`))
@@ -1090,7 +1091,8 @@ func TestUpdateProviderRejectsImmutableCredentialChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	router := NewWithDB(cfg, testHelper{}, database, queries).Router()
+	server := NewWithDB(cfg, testHelper{}, database, queries)
+	router := server.Router()
 
 	createResponse := httptest.NewRecorder()
 	createRequest := httptest.NewRequest("POST", "/api/admin/providers", strings.NewReader(`{"provider_type":"feishu","display_name":"飞书","config":{"client_id":"cli_original","client_secret":"secret_original"}}`))
@@ -1136,8 +1138,26 @@ func TestUpdateProviderRejectsImmutableCredentialChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := decodeSourceConfigForType("feishu", configJSON)
-	if displayName != "飞书主应用" || config.ClientID != "cli_original" || config.ClientSecret != "secret_original" || config.SyncIntervalMinutes != 15 {
+	if displayName != "飞书主应用" || config.ClientID != "cli_original" || config.SyncIntervalMinutes != 15 {
 		t.Fatalf("unexpected stored source after updates: display_name=%q config=%#v", displayName, config)
+	}
+	if config.ClientSecret != "" || strings.Contains(configJSON, "client_secret") || strings.Contains(configJSON, "secret_original") {
+		t.Fatalf("provider secret remained in config_json: %s", configJSON)
+	}
+	var encryptedSecret string
+	if err := database.QueryRowContext(context.Background(), `SELECT encrypted_secret FROM source_client_secrets WHERE source_slug = ?`, created.Slug).Scan(&encryptedSecret); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(encryptedSecret, "v1:") || strings.Contains(encryptedSecret, "secret_original") {
+		t.Fatalf("provider secret was not encrypted independently: %q", encryptedSecret)
+	}
+	source, err := server.loadIdentitySource(context.Background(), created.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := decodeSourceConfigForType(source.ProviderType, source.ConfigJSON)
+	if restored.ClientSecret != "secret_original" {
+		t.Fatal("provider secret was not restored from encrypted storage")
 	}
 }
 

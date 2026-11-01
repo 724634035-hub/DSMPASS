@@ -106,6 +106,12 @@ CREATE TABLE IF NOT EXISTS source_initial_password_secrets (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS source_client_secrets (
+    source_slug TEXT PRIMARY KEY,
+    encrypted_secret TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS provider_groups (
     id TEXT PRIMARY KEY,
     provider_slug TEXT NOT NULL,

@@ -30,6 +30,10 @@ ORDER BY created_at`)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 			return
 		}
+		if err := s.hydrateSourceClientSecret(c.Request.Context(), &source); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+			return
+		}
 		config := decodeSourceConfigForType(source.ProviderType, source.ConfigJSON)
 		response, err := s.sourceResponse(c.Request.Context(), source, config, s.trustedPublicBaseURL())
 		if err != nil {
@@ -80,6 +84,8 @@ func (s *Server) createProvider(c *gin.Context) {
 		return
 	}
 	config := withSourceDefaultsForType(payload.ProviderType, payload.Config)
+	clientSecret := strings.TrimSpace(config.ClientSecret)
+	config.ClientSecret = ""
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
@@ -104,6 +110,9 @@ WHERE ? OR NOT EXISTS (SELECT 1 FROM identity_sources)
 			}
 		}
 		if err := s.ensureSourceInitialPassword(c.Request.Context(), q, slug); err != nil {
+			return http.StatusInternalServerError, err.Error(), err
+		}
+		if err := s.saveSourceClientSecret(c.Request.Context(), q, slug, clientSecret); err != nil {
 			return http.StatusInternalServerError, err.Error(), err
 		}
 		return http.StatusOK, "", nil
@@ -160,20 +169,50 @@ func (s *Server) updateProvider(c *gin.Context) {
 		displayName = strings.TrimSpace(*payload.DisplayName)
 	}
 	config := decodeSourceConfigForType(source.ProviderType, source.ConfigJSON)
+	clientSecret := ""
 	if payload.Config != nil {
 		if detail := immutableSourceConfigChangeDetail(config, *payload.Config); detail != "" {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": detail})
 			return
 		}
+		clientSecret = strings.TrimSpace(payload.Config.ClientSecret)
 		config = mergeSourceConfigForType(source.ProviderType, config, *payload.Config)
 	}
-	configJSON, _ := json.Marshal(config)
-	_, err = s.store.DBTX().ExecContext(c.Request.Context(), `
+	config.ClientSecret = ""
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	update := func(q db.DBTX) error {
+		if _, err := q.ExecContext(c.Request.Context(), `
 UPDATE identity_sources
 SET display_name = ?, enabled = ?, login_enabled = ?, directory_sync_enabled = ?, config_json = ?, updated_at = CURRENT_TIMESTAMP
 WHERE slug = ?
-`, displayName, boolPtrInt(payload.Enabled, source.Enabled == 1), boolPtrInt(payload.LoginEnabled, source.LoginEnabled == 1), boolPtrInt(payload.DirectorySyncEnabled, source.DirectorySyncEnabled == 1), string(configJSON), slug)
-	if err != nil {
+`, displayName, boolPtrInt(payload.Enabled, source.Enabled == 1), boolPtrInt(payload.LoginEnabled, source.LoginEnabled == 1), boolPtrInt(payload.DirectorySyncEnabled, source.DirectorySyncEnabled == 1), string(configJSON), slug); err != nil {
+			return err
+		}
+		if clientSecret != "" {
+			return s.saveSourceClientSecret(c.Request.Context(), q, slug, clientSecret)
+		}
+		return nil
+	}
+	if s.database != nil {
+		tx, err := s.database.BeginTx(c.Request.Context(), nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := update(tx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+			return
+		}
+	} else if err := update(s.store.DBTX()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
@@ -253,6 +292,10 @@ WHERE id IN (`+placeholders(len(exclusiveAccountIDs))+`)`, anySlice(exclusiveAcc
 		return
 	}
 	if _, err := tx.ExecContext(c.Request.Context(), `DELETE FROM source_initial_password_secrets WHERE source_slug = ?`, slug); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	if err := s.deleteSourceClientSecret(c.Request.Context(), tx, slug); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}

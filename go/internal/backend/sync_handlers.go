@@ -19,7 +19,7 @@ func (s *Server) syncApply(c *gin.Context) {
 }
 
 func (s *Server) startProviderSyncRun(c *gin.Context) {
-	mode, ok := readSyncMode(c)
+	mode, passwordResetConfirmed, ok := readSyncMode(c)
 	if !ok {
 		return
 	}
@@ -35,7 +35,7 @@ func (s *Server) startProviderSyncRun(c *gin.Context) {
 	}
 	go func() {
 		ctx := context.Background()
-		_, err := s.runSyncProviderModeWithProgress(ctx, sourceSlug, mode, progress)
+		_, err := s.runSyncProviderModeWithProgress(ctx, sourceSlug, mode, passwordResetConfirmed, progress)
 		if err != nil {
 			progress.fail(ctx, err)
 			return
@@ -46,17 +46,21 @@ func (s *Server) startProviderSyncRun(c *gin.Context) {
 }
 
 func (s *Server) syncProvider(c *gin.Context) {
-	mode, ok := readSyncMode(c)
+	mode, passwordResetConfirmed, ok := readSyncMode(c)
 	if !ok {
 		return
 	}
-	result, err := s.runSyncProviderModeWithProgress(c.Request.Context(), c.Param("provider"), mode, nil)
+	result, err := s.runSyncProviderModeWithProgress(c.Request.Context(), c.Param("provider"), mode, passwordResetConfirmed, nil)
 	if errors.Is(err, errUnknownProvider) {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "unknown provider"})
 		return
 	}
 	if errors.Is(err, errSyncAlreadyRunning) {
 		c.JSON(http.StatusConflict, gin.H{"detail": "sync already running"})
+		return
+	}
+	if errors.Is(err, errFullSyncConfirmationRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "full sync requires password_reset_confirmed=true"})
 		return
 	}
 	if err != nil {
@@ -71,10 +75,13 @@ func (s *Server) runSyncProvider(ctx context.Context, providerSlug string) (sync
 }
 
 func (s *Server) runSyncProviderWithProgress(ctx context.Context, providerSlug string, progress *operationProgress) (syncsvc.Result, error) {
-	return s.runSyncProviderModeWithProgress(ctx, providerSlug, syncIncremental, progress)
+	return s.runSyncProviderModeWithProgress(ctx, providerSlug, syncIncremental, false, progress)
 }
 
-func (s *Server) runSyncProviderModeWithProgress(ctx context.Context, providerSlug string, mode syncMode, progress *operationProgress) (syncsvc.Result, error) {
+func (s *Server) runSyncProviderModeWithProgress(ctx context.Context, providerSlug string, mode syncMode, passwordResetConfirmed bool, progress *operationProgress) (syncsvc.Result, error) {
+	if mode == syncFull && !passwordResetConfirmed {
+		return syncsvc.Result{}, errFullSyncConfirmationRequired
+	}
 	defer s.maybeCleanupLogs(ctx)
 	directory, ok := s.directoryProvider(providerSlug)
 	if !ok {
@@ -109,6 +116,7 @@ ON CONFLICT(id) DO NOTHING
 	defer func() { _ = logBuffer.Flush() }()
 	policy := s.sourceSyncPolicy(ctx, directory.Slug())
 	policy.FullSync = mode == syncFull
+	policy.PasswordResetConfirmed = passwordResetConfirmed
 	logBuffer.Log(runID, directory.Slug(), "identity_source", directory.Slug(), "", "sync_mode", "success", "", string(mode), "")
 	if progress != nil {
 		progress.message(ctx, "读取身份源", "正在读取身份源通讯录")
@@ -218,10 +226,11 @@ func (s *Server) endSourceSync(slug string) {
 }
 
 type sourceSyncPolicy struct {
-	FullSync              bool
-	DisableMissingUsers   bool
-	DeactivateMissingData bool
-	PreserveMissingGroups bool
+	FullSync               bool
+	PasswordResetConfirmed bool
+	DisableMissingUsers    bool
+	DeactivateMissingData  bool
+	PreserveMissingGroups  bool
 }
 
 func (s *Server) sourceSyncPolicy(ctx context.Context, sourceSlug string) sourceSyncPolicy {
@@ -242,6 +251,9 @@ func (s *Server) syncSourceToDSM(ctx context.Context, runID, sourceSlug, syncSta
 
 func (s *Server) syncSourceToDSMWithBuffer(ctx context.Context, runID, sourceSlug, syncStart string, policy sourceSyncPolicy, logBuffer *syncLogBuffer, progress *operationProgress) ([]syncsvc.PlanItem, error) {
 	var operations []syncsvc.PlanItem
+	if policy.FullSync && !policy.PasswordResetConfirmed {
+		return operations, errFullSyncConfirmationRequired
+	}
 	if err := s.ensureRealDSMProvisioning(ctx); err != nil {
 		return operations, err
 	}

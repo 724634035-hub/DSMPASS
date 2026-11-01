@@ -96,7 +96,13 @@ FROM identity_sources
 WHERE slug = ?`, slug)
 	var source db.IdentitySource
 	err := row.Scan(&source.Slug, &source.ProviderType, &source.DisplayName, &source.Enabled, &source.LoginEnabled, &source.DirectorySyncEnabled, &source.ConfigJSON, &source.CreatedAt, &source.UpdatedAt)
-	return source, err
+	if err != nil {
+		return source, err
+	}
+	if err := s.hydrateSourceClientSecret(ctx, &source); err != nil {
+		return source, err
+	}
+	return source, nil
 }
 
 func (s *Server) feishuConfigForSource(source db.IdentitySource) config.BackendConfig {
@@ -227,10 +233,13 @@ func (s *Server) CleanupIdentitySourcePublicBaseURLs(ctx context.Context) error 
 		if err := json.Unmarshal([]byte(raw), &config); err != nil {
 			continue
 		}
-		if _, ok := config["public_base_url"]; !ok {
+		_, hasPublicBaseURL := config["public_base_url"]
+		_, hasClientSecret := config["client_secret"]
+		if !hasPublicBaseURL && !hasClientSecret {
 			continue
 		}
 		delete(config, "public_base_url")
+		delete(config, "client_secret")
 		encoded, err := json.Marshal(config)
 		if err != nil {
 			return err

@@ -4,12 +4,11 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -18,8 +17,70 @@ import (
 	"github.com/dsmpass/dsmpass/go/internal/db"
 )
 
-const generatedInitialPasswordBytes = 16
+const (
+	generatedInitialPasswordBytes = 16
+	initialPasswordVersion        = "v2:"
+)
 
+func (s *Server) migrateLegacyInitialPasswords(ctx context.Context) error {
+	rows, err := s.store.DBTX().QueryContext(ctx, `
+SELECT source_slug, encrypted_password
+FROM source_initial_password_secrets`)
+	if err != nil {
+		return err
+	}
+	type migration struct {
+		sourceSlug string
+		oldValue   string
+		newValue   string
+	}
+	migrations := make([]migration, 0)
+	for rows.Next() {
+		var sourceSlug, encrypted string
+		if err := rows.Scan(&sourceSlug, &encrypted); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if strings.HasPrefix(encrypted, initialPasswordVersion) {
+			continue
+		}
+		password, err := s.decryptLegacyInitialPassword(sourceSlug, encrypted)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decrypt legacy initial password for %s: %w", sourceSlug, err)
+		}
+		migrated, err := s.encryptInitialPassword(sourceSlug, password)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("encrypt initial password for %s: %w", sourceSlug, err)
+		}
+		migrations = append(migrations, migration{sourceSlug: sourceSlug, oldValue: encrypted, newValue: migrated})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, migration := range migrations {
+		result, err := s.store.DBTX().ExecContext(ctx, `
+UPDATE source_initial_password_secrets
+SET encrypted_password = ?, updated_at = CURRENT_TIMESTAMP
+WHERE source_slug = ? AND encrypted_password = ?`, migration.newValue, migration.sourceSlug, migration.oldValue)
+		if err != nil {
+			return fmt.Errorf("migrate initial password for %s: %w", migration.sourceSlug, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("verify initial password migration for %s: %w", migration.sourceSlug, err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("migrate initial password for %s: source record changed concurrently", migration.sourceSlug)
+		}
+	}
+	return nil
+}
 func generatedInitialPassword() string {
 	return randomHex(generatedInitialPasswordBytes)
 }
@@ -66,7 +127,22 @@ FROM source_initial_password_secrets
 WHERE source_slug = ?`, sourceSlug).Scan(&encrypted)
 	if err == nil {
 		password, err := s.decryptInitialPassword(sourceSlug, encrypted)
-		return password, true, err
+		if err != nil {
+			return "", false, err
+		}
+		if !strings.HasPrefix(encrypted, initialPasswordVersion) {
+			migrated, err := s.encryptInitialPassword(sourceSlug, password)
+			if err != nil {
+				return "", false, err
+			}
+			if _, err := s.store.DBTX().ExecContext(ctx, `
+UPDATE source_initial_password_secrets
+SET encrypted_password = ?, updated_at = CURRENT_TIMESTAMP
+WHERE source_slug = ? AND encrypted_password = ?`, migrated, sourceSlug, encrypted); err != nil {
+				return "", false, err
+			}
+		}
+		return password, true, nil
 	}
 	if err == sql.ErrNoRows {
 		return "", false, nil
@@ -92,21 +168,30 @@ VALUES (?, ?, ?, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 }
 
 func (s *Server) encryptInitialPassword(scope, password string) (string, error) {
-	aead, err := s.initialPasswordAEAD()
+	payload, err := s.sealData(initialPasswordPurpose(scope), []byte(password))
 	if err != nil {
 		return "", err
 	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	ciphertext := aead.Seal(nil, nonce, []byte(password), []byte(scope))
-	payload := append(nonce, ciphertext...)
-	return base64.RawURLEncoding.EncodeToString(payload), nil
+	return initialPasswordVersion + payload, nil
 }
 
 func (s *Server) decryptInitialPassword(scope, encrypted string) (string, error) {
-	aead, err := s.initialPasswordAEAD()
+	if strings.HasPrefix(encrypted, initialPasswordVersion) {
+		plaintext, err := s.openData(initialPasswordPurpose(scope), strings.TrimPrefix(encrypted, initialPasswordVersion))
+		if err != nil {
+			return "", err
+		}
+		return string(plaintext), nil
+	}
+	return s.decryptLegacyInitialPassword(scope, encrypted)
+}
+
+func initialPasswordPurpose(scope string) string {
+	return "source-initial-password:" + strings.TrimSpace(scope)
+}
+
+func (s *Server) decryptLegacyInitialPassword(scope, encrypted string) (string, error) {
+	aead, err := s.legacyInitialPasswordAEAD()
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +210,9 @@ func (s *Server) decryptInitialPassword(scope, encrypted string) (string, error)
 	return string(plaintext), nil
 }
 
-func (s *Server) initialPasswordAEAD() (cipher.AEAD, error) {
+// legacyInitialPasswordAEAD is retained only to migrate ciphertext produced by
+// releases that derived the initial-password key from the admin JWT secret.
+func (s *Server) legacyInitialPasswordAEAD() (cipher.AEAD, error) {
 	material := append([]byte("dsmpass-initial-password-v1:"), s.adminJWTSecret()...)
 	key := sha256.Sum256(material)
 	block, err := aes.NewCipher(key[:])
@@ -175,22 +262,13 @@ func (s *Server) revealProviderInitialPassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
-	var encrypted string
-	err = s.store.DBTX().QueryRowContext(c.Request.Context(), `
-SELECT encrypted_password
-FROM source_initial_password_secrets
-WHERE source_slug = ?`, source.Slug).Scan(&encrypted)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "initial password not found"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
-		return
-	}
-	password, err := s.decryptInitialPassword(source.Slug, encrypted)
+	password, ok, err := s.lookupSourceInitialPassword(c.Request.Context(), source.Slug)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "initial password cannot be decrypted"})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "initial password not found"})
 		return
 	}
 	_, _ = s.store.DBTX().ExecContext(c.Request.Context(), `

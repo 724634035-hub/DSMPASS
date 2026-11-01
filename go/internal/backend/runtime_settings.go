@@ -42,9 +42,6 @@ func (s *Server) LoadRuntimeSettings(ctx context.Context) error {
 		s.applyRuntimeSetting(row.Key, value)
 	}
 	s.refreshAdminSetupState()
-	if err := s.ensureAdminJWTSecret(ctx); err != nil {
-		return err
-	}
 	if err := s.ensureHelperHMACSecret(ctx); err != nil {
 		return err
 	}

@@ -28,22 +28,29 @@ func (mode syncMode) label() string {
 	return "增量同步"
 }
 
-func readSyncMode(c *gin.Context) (syncMode, bool) {
+var errFullSyncConfirmationRequired = errors.New("full sync requires explicit password reset confirmation")
+
+func readSyncMode(c *gin.Context) (syncMode, bool, bool) {
 	var payload struct {
-		Mode syncMode `json:"mode"`
+		Mode                   syncMode `json:"mode"`
+		PasswordResetConfirmed bool     `json:"password_reset_confirmed"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid sync mode request"})
-		return "", false
+		return "", false, false
 	}
 	if payload.Mode == "" {
 		payload.Mode = syncIncremental
 	}
 	if payload.Mode != syncIncremental && payload.Mode != syncFull {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "mode must be incremental or full"})
-		return "", false
+		return "", false, false
 	}
-	return payload.Mode, true
+	if payload.Mode == syncFull && !payload.PasswordResetConfirmed {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "full sync requires password_reset_confirmed=true"})
+		return "", false, false
+	}
+	return payload.Mode, payload.PasswordResetConfirmed, true
 }
 
 func (s *Server) resetFullSyncPasswords(ctx context.Context, runID, sourceSlug string, buffer *syncLogBuffer, progress *operationProgress) ([]syncsvc.PlanItem, error) {

@@ -100,8 +100,16 @@ export const api = {
   adminLogout: () => request<{ authenticated: boolean }>("/api/admin/auth/logout", { method: "POST" }),
   adminChangePassword: (payload: AdminPasswordChange) =>
     request<{ success: boolean; username: string }>("/api/admin/auth/password", { method: "PUT", body: JSON.stringify(payload) }),
-  syncApply: (provider: string, mode: SyncMode = "incremental") => request<SyncResult>(`/api/sync/${provider}/apply`, { method: "POST", body: JSON.stringify({ mode }) }),
-  startSyncRun: (provider: string, mode: SyncMode = "incremental") => request<{ run_id: string }>(`/api/admin/providers/${provider}/sync-runs`, { method: "POST", body: JSON.stringify({ mode }) }),
+  syncApply: (provider: string, mode: SyncMode = "incremental", passwordResetConfirmed = false) =>
+    request<SyncResult>(`/api/sync/${provider}/apply`, {
+      method: "POST",
+      body: JSON.stringify(mode === "full" ? { mode, password_reset_confirmed: passwordResetConfirmed } : { mode }),
+    }),
+  startSyncRun: (provider: string, mode: SyncMode = "incremental", passwordResetConfirmed = false) =>
+    request<{ run_id: string }>(`/api/admin/providers/${provider}/sync-runs`, {
+      method: "POST",
+      body: JSON.stringify(mode === "full" ? { mode, password_reset_confirmed: passwordResetConfirmed } : { mode }),
+    }),
   listDSMAccounts: (params?: ListParams) => request<PagedResponse<DSMAccount>>(`/api/admin/dsm-accounts${queryString(params)}`),
   listAllDSMAccounts: (params?: ListParams) => listAllPaged<DSMAccount>(api.listDSMAccounts, { ...params, limit: params?.limit ?? MAX_PAGE_LIMIT }),
   listDSMGroups: (params?: ListParams) => request<PagedResponse<DSMGroup>>(`/api/admin/dsm-groups${queryString(params)}`),
