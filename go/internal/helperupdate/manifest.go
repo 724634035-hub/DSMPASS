@@ -18,7 +18,7 @@ import (
 
 // Only this public key is installed on a NAS. The release seed stays with the
 // publisher; package files and backend configuration cannot replace the key.
-const PublicKey = "Hbt0HrX7UbZdqwjj1Zs5r0qHf+ubfCj7ScrefewEKHo="
+const PublicKey = "A6X6kocMlmKUWSuzlC+0wQrVoyVHBemJgtd8jFzoq4c="
 const Domain = "DSMPASS protected Helper release v1\n"
 const ManifestFile = "helper-release.json"
 const SignatureFile = "helper-release.sig"
